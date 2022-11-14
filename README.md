@@ -3,6 +3,8 @@
 [![Build Status](https://travis-ci.org/google/leveldb.svg?branch=master)](https://travis-ci.org/google/leveldb)
 
 Authors: Sanjay Ghemawat (sanjay@google.com) and Jeff Dean (jeff@google.com)
+# BlockDB
+The Code provided by the authors of "Reducing Write Amplification of LSM-Tree with Block-Grained Compaction".
 
 # Features
   * Keys and values are arbitrary byte arrays.

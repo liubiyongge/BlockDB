@@ -25,15 +25,35 @@ Status BuildTable(const std::string &dbname, Env *env, const Options &options,
   std::string fname = TableFileName(dbname, meta->number);
   TableEditor *editor = nullptr;
   if (iter->Valid()) {
-    //
     editor = new TableEditor(options, dbname, meta->number, meta->file_size,
-                             buffer, options.direct_io);
+                             0 /*target level*/, nullptr /* filter*/, buffer);
     uint64_t start_micros = env->NowMicros();
+
+    ParsedInternalKey ikey;
+    std::string current_user_key;
+    bool has_current_user_key = false;
+
     meta->smallest.DecodeFrom(iter->key());
     for (; iter->Valid(); iter->Next()) {
       Slice key = iter->key();
-      meta->largest.DecodeFrom(key);
-      editor->AddNData(key, iter->value());
+      bool drop = false;
+      {
+        // Remove obsolete key-value pairs
+        ParseInternalKey(key, &ikey);
+        if (!has_current_user_key ||
+            options.comparator->Compare(ikey.user_key,
+                                        Slice(current_user_key)) != 0) {
+          // First occurrence of this user key
+          current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
+          has_current_user_key = true;
+        } else {
+          drop = true;
+        }
+      }
+      if (!drop) {
+        meta->largest.DecodeFrom(key);
+        editor->AddPair(key, iter->value());
+      }
     }
     // Finish and check for builder errors
     if (s.ok()) {

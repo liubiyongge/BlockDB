@@ -87,7 +87,8 @@ class HybridCompaction {
   // ++++++++++++++ block compaction ++++++++++++++
   void UpdateOneDataBlock(TableEditor* editor, TableContext* ctx_0,
                           Iterator*& t1_kvs_iter);
-  TableEditor* NewTableEditorForUpdate(FileMetaData* fmd_1, int cache_id);
+  TableEditor* NewTableEditorForUpdate(FileMetaData* fmd_1,
+                                       std::string* old_filter, int cache_id);
   void DoBlockCompaction(int input_id, int cache_id, TableContext* ctx_0,
                          FileMetaData* fmd_1, std::vector<BlockIndex>& result,
                          JobStats& job_stats);
@@ -103,10 +104,13 @@ class HybridCompaction {
  private:
   Env* env_;
   const InternalKeyComparator internal_comparator_;
+
   const Options ops_;
+  uint64_t target_level_;
   CompactionState* compact_;
   VersionSet* version_set_;
   TableCache* table_cache_;
+
   std::set<uint64_t>* pending_outputs_;
   char** upper_tables_;
   char** write_caches_;

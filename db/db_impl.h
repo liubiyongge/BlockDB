@@ -138,7 +138,7 @@ class DBImpl : public DB {
                        SequenceNumber &last_sequence_for_key);
 
   // Simple Compaction
-  TableEditor *NewTableEditorForCreate(int buff_id, bool is_direct);
+  TableEditor *NewSimpleTableEditor(int buff_id);
   Status FinishTableCompaction(CompactionState *compact, TableEditor *&editor);
 
   uint64_t cnt_delete = 0;

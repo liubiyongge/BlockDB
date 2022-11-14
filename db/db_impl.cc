@@ -4,8 +4,10 @@
 
 #include "db/db_impl.h"
 
+#include <malloc.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -155,30 +157,15 @@ DBImpl::DBImpl(const Options &raw_options, const std::string &dbname)
   }
 
   // caches used to buffer new sstables during compaction operations.
-  // if (options_.direct_io) {
   write_caches_ = new char *[num_workers_];
   for (uint64_t i = 0; i < num_workers_; i++) {
-    int ret = posix_memalign((void **)&write_caches_[i], 4096, 32 << 20);
-    if (ret != 0) {
-      printf("write_tables: failed to posix_memalign: %s\n", strerror(errno));
-      exit(0);
-    }
-    // 256 MB
-    memset(write_caches_[i], 0, 32 << 20);
+    write_caches_[i] = reinterpret_cast<char *>(memalign(4096, 4ul << 20));
+    assert(write_caches_[i] != nullptr);
   }
-  // }
 
   // flush_space
-  // if (options_.direct_io) {
-  flush_buffer_ = nullptr;
-  int ret = posix_memalign((void **)&flush_buffer_, 4096, 32 << 20);
-  if (ret != 0) {
-    printf("Failed to posix_memalign: %s\n", strerror(errno));
-    exit(0);
-  }
-  // 256 MB
-  memset(flush_buffer_, 0, 32 << 20);
-  //  }
+  flush_buffer_ = reinterpret_cast<char *>(memalign(4096, 4ul << 20));
+  assert(flush_buffer_ != nullptr);
 
   hybrid = new HybridCompaction(env_, options_, dbname_, thread_pool_,
                                 table_cache_, internal_comparator_,
@@ -235,10 +222,9 @@ DBImpl::~DBImpl() {
   delete[] write_caches_;
   write_caches_ = nullptr;
 
-  delete flush_buffer_;
+  free(flush_buffer_);
   flush_buffer_ = nullptr;
 
-  // }
   delete hybrid;
   delete thread_pool_;
   delete versions_;
@@ -801,9 +787,7 @@ void DBImpl::BackgroundCompaction() {
         options_.selective_compaction && is_trivial) {
       /**
        * When sstables are moved into the last level, we may rebuild
-       * sstables to recycle obsolete spaces. We consider two factors.
-       * 1. the last level is set to 5 (100 GB).
-       * 2. file size is larger than data size.
+       * sstables to recycle obsolete spaces.
        */
       FileMetaData *f = c->input(0, 0);
       if (c->level() >= options_.last_level &&
@@ -891,8 +875,8 @@ void DBImpl::CleanupCompaction(CompactionState *compact) {
 }
 
 Status DBImpl::OpenCompactionOutputFile(CompactionState *compact) {
-  assert(compact != NULL);
-  assert(compact->builder == NULL);
+  assert(compact != nullptr);
+  assert(compact->builder == nullptr);
   uint64_t file_number;
   {
     mutex_.Lock();
@@ -1241,10 +1225,10 @@ Status DBImpl::Get(const ReadOptions &options, const Slice &key,
     LookupKey lkey(key, snapshot);
     if (mem->Get(lkey, value, &s)) {
       // Done
-      gMemTableHit++;
+      g_memtable_hit++;
     } else if (imm != NULL && imm->Get(lkey, value, &s)) {
       // Done
-      gMemTableHit++;
+      g_memtable_hit++;
     } else {
       s = current->Get(options, lkey, value, &stats);
       have_stat_update = true;
@@ -1589,31 +1573,57 @@ bool DBImpl::GetProperty(const Slice &property, std::string *value) {
       memset(buf, 0, 1024);
     }
     value->append(buf);
-    //
+
+    // delete time
     memset(buf, 0, 1024);
     snprintf(buf, sizeof(buf), "Delete Time(s): %f\n", all_delete / 1e6);
     value->append(buf);
-    //
+
+    // prepare work
     memset(buf, 0, 1024);
     snprintf(buf, sizeof(buf),
-             "Prepare File: %ld Prepare Chosen: %ld Prepare Data: %ld\n",
-             gPrepareFile, gPrepareChosen, gPrepareData);
+             "DoPrepareWork: \n"
+             "file_size: %ld file_data: %ld choosen: %ld\n",
+             g_large_sstable_file.load(), g_small_sstable_data.load(),
+             g_large_choosen_data.load());
     value->append(buf);
+
+    // table index size.
+    memset(buf, 0, 1024);
+    snprintf(buf, sizeof(buf), "memory table index size: %ld\n",
+             g_memory_table_index_size.load());
+    value->append(buf);
+
+    // filter size
+    memset(buf, 0, 1024);
+    snprintf(buf, sizeof(buf), "memory filter size: %ld\n",
+             g_memory_filter_size.load());
+    value->append(buf);
+
     return true;
   } else if (in == "hit-ratio") {
     char buf[1024];
+    // memtable & immutable memtable
     memset(buf, 0, 1024);
-    snprintf(buf, sizeof(buf),
-             "MemTableHit  TableCacheHit  TableCacheMiss  BlockCacheHit  "
-             "BlockCacheMiss\n"
-             "----------------------------------------------------------"
-             "--------------\n");
+    snprintf(buf, sizeof(buf), "Memtable hit: %ld \n\n", g_memtable_hit.load());
     value->append(buf);
-    //
+
+    // table cache
     memset(buf, 0, 1024);
-    snprintf(buf, sizeof(buf), "%11ld  %13ld  %14ld  %13ld  %14ld\n",
-             gMemTableHit, gTableCacheHit, gTableCacheMiss, gBlockCacheHit,
-             gBlockCacheMiss);
+    snprintf(buf, sizeof(buf), "table cache hit: %ld, table cache miss: %ld\n",
+             g_table_cache_hit.load(), g_table_cache_miss.load());
+    value->append(buf);
+
+    // block cache
+    memset(buf, 0, 1024);
+    snprintf(buf, sizeof(buf), "block cache hit: %ld, block cache miss: %ld\n",
+             g_block_cache_hit.load(), g_block_cache_miss.load());
+    value->append(buf);
+
+    // block cache add bytes
+    memset(buf, 0, 1024);
+    snprintf(buf, sizeof(buf), "block cache add bytes: %ld\n",
+             g_block_cache_add_bytes.load());
     value->append(buf);
     return true;
   } else if (in == "index") {
@@ -1879,7 +1889,11 @@ bool DBImpl::HandleTargetKey(CompactionState *compact, Slice &target_key,
     if (!has_current_user_key ||
         user_comparator()->Compare(ikey.user_key, Slice(current_user_key)) !=
             0) {
-      // First occurrence of this user key
+      // First occurrence of this user key, we set 'last_sequence_for_key' to be
+      // 'kMaxSequenceNumber'. Then, we let it to be ikey.sequence. If meeting
+      // the same key, 'last_sequence' must be smaller than smallest snapshot.
+      //
+      // smallest_snapshot = versions_->LastSequence();
       current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
       has_current_user_key = true;
       last_sequence_for_key = kMaxSequenceNumber;
@@ -1905,7 +1919,7 @@ bool DBImpl::HandleTargetKey(CompactionState *compact, Slice &target_key,
   return drop;
 }
 
-TableEditor *DBImpl::NewTableEditorForCreate(int buff_id, bool is_direct) {
+TableEditor *DBImpl::NewSimpleTableEditor(int buff_id) {
   uint64_t file_number;
   uint64_t file_offset;
   {
@@ -1916,7 +1930,8 @@ TableEditor *DBImpl::NewTableEditorForCreate(int buff_id, bool is_direct) {
     mutex_.Unlock();
   }
   return new TableEditor(options_, dbname_, file_number, file_offset,
-                         write_caches_[buff_id], is_direct);
+                         0 /*target level*/, nullptr /* filter*/,
+                         write_caches_[buff_id]);
 }
 
 Status DBImpl::FinishTableCompaction(CompactionState *compact,
@@ -2021,14 +2036,14 @@ Status DBImpl::DoSimpleCompactionWork(CompactionState *compact) {
     if (!drop) {
       // Open output file if necessary
       if (editor == nullptr) {
-        editor = NewTableEditorForCreate(0, options_.direct_io);
+        editor = NewSimpleTableEditor(0);
       }
       if (editor->NumEntries() == 0) {
         editor->set_smallest(key);
       }
 
       editor->set_largest(key);
-      editor->AddNData(key, input->value());
+      editor->AddPair(key, input->value());
 
       // Close output file if it is big enough
       if (editor->FileSize() >= compact->compaction->MaxOutputTableSize()) {

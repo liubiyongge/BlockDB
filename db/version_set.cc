@@ -45,17 +45,18 @@ static double MaxBytesForLevel(const Options *options, int level) {
   // the level-0 compaction threshold based on number of files.
 
   // Result for both level-0 and level-1
-  // double result = 8. * TargetTableSize(options);
-  // while (level > 1) {
-  //   result *= 10;
-  //   level--;
-  // }
+  double result = 8. * TargetTableSize(options);
+  while (level > 1) {
+    result *= 10;
+    level--;
+  }
 
-  static const double bytes[] = {128 * 1048576.0,    128 * 1048576.0,
-                                 1024 * 1048576.0,   8192 * 1048576.0,
-                                 32768 * 1048576.0,  262144 * 1048576.0,
-                                 2097152 * 1048576.0};
-  return bytes[level];
+  // static const double bytes[] = {128 * 1048576.0,    128 * 1048576.0,
+  //                                1024 * 1048576.0,   8192 * 1048576.0,
+  //                                32768 * 1048576.0,  262144 * 1048576.0,
+  //                                2097152 * 1048576.0};
+
+  return result;
 }
 
 static uint64_t MaxTableSizeForLevel(const Options *options, int level) {
@@ -612,8 +613,8 @@ std::string Version::DebugString() const {
 }
 
 void Version::Print() {
-  uint64_t size = 0;
   Cache::Handle *handle = nullptr;
+  uint64_t size = 0;
   //
   TableCache *cache = vset_->table_cache_;
   for (int level = 0; level < config::kNumLevels; level++) {

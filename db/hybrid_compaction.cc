@@ -18,6 +18,7 @@ HybridCompaction::HybridCompaction(
     port::Mutex *mtx, CompactionStats *stats)
     : env_(env),
       ops_(ops),
+      target_level_(0),
       dbname_(dbname),
       thread_pool_(thread_pool),
       table_cache_(table_cache),
@@ -38,11 +39,11 @@ void HybridCompaction::DoWork(CompactionState *compact) {
   mutex_->AssertHeld();
   uint64_t start_micros = env_->NowMicros();
   compact_ = compact;
-  int level = compact_->compaction->level();
-  assert(level > 0);
-  Log(ops_.info_log, "Compacting %d@%d + %d@%d files",
-      compact_->compaction->num_input_files(0), level + 0,
-      compact_->compaction->num_input_files(1), level + 1);
+  target_level_ = compact_->compaction->level();
+  assert(target_level_ > 0);
+  Log(ops_.info_log, "Compacting %d@%ld + %d@%ld files",
+      compact_->compaction->num_input_files(0), target_level_,
+      compact_->compaction->num_input_files(1), target_level_ + 1);
 
   mutex_->Unlock();
 
@@ -103,7 +104,7 @@ void HybridCompaction::DoWork(CompactionState *compact) {
   stats.block_micros = job_stats.block_micros;
   stats.block_finish_micros = job_stats.block_finish_micros;
   //
-  stats_[compact_->compaction->level() + 1].Add(stats);
+  stats_[target_level_ + 1].Add(stats);
 }
 
 void HybridCompaction::Finish() {
@@ -334,35 +335,65 @@ bool HybridCompaction::AccessNextDataBlock_T1(Table *table_1, char *file_1,
 
 bool HybridCompaction::PrepareWork(
     FileMetaData *fmd_1, std::vector<HybridCompaction::BlockIndex> &result) {
+  // Table Compaction
+  if (ops_.compaction == CompactionType::kTableCompaction) {
+    return false;
+  }
+
   Compaction *c = compact_->compaction;
   const Comparator *cmp = ops_.comparator;
   int level = c->level();
 
-  // if the data size of the SSTable is too large, we use table compaction to
+  // File Size
+  //
+  // If the data size of the SSTable is too large, we use table compaction to
   // reorganize it into multiple SSTables for avoiding large-scale compaction
   // tasks. Otherwise, LSM-Tree will have the hidden trouble of write pause.
-  if (fmd_1->file_size > 8.0 * max_sstable_size) {
-    gPrepareFile++;
-    return false;
-  }
-
-  // if the ratio of the data size to the file size is too small (which means
-  // there are too many obsolete blocks), we use table compaction to recycle
-  // these blocks. Otherwise, LSM-Tree will consume much space consumption.
-
   if (ops_.selective_compaction) {
     if (level < ops_.last_level) {
-      if (fmd_1->data_size < 0.4 * fmd_1->file_size) return false;
+      if (fmd_1->file_size > 4.0 * max_sstable_size) {
+        g_large_sstable_file++;
+        return false;
+      }
     } else {
-      if (fmd_1->data_size < 0.8 * fmd_1->file_size) return false;
+      if (fmd_1->file_size > 1.5 * max_sstable_size) {
+        g_large_sstable_file++;
+        return false;
+      }
     }
   } else {
-    if (fmd_1->data_size < 0.4 * fmd_1->file_size) {
-      gPrepareData++;
+    if (fmd_1->file_size > 4.0 * max_sstable_size) {
+      g_large_sstable_file++;
       return false;
     }
   }
 
+  // Data Size
+  //
+  // if the ratio of the data size to the file size is too small (which means
+  // there are too many obsolete blocks), we use table compaction to recycle
+  // these blocks. Otherwise, LSM-Tree will consume much space consumption.
+  if (ops_.selective_compaction) {
+    if (level < ops_.last_level) {
+      if (fmd_1->data_size < 0.4 * fmd_1->file_size) {
+        g_small_sstable_data++;
+        return false;
+      }
+    } else {
+      if (fmd_1->data_size < 0.8 * fmd_1->file_size) {
+        g_small_sstable_data++;
+        return false;
+      }
+    }
+  } else {
+    if (fmd_1->data_size < 0.4 * fmd_1->file_size) {
+      g_small_sstable_data++;
+      return false;
+    }
+  }
+
+  // Victim Ratio
+  //
   // We find target data blocks of the target SSTable in the lower level.
   // The method is to use the index block of the target SSTable to require the
   // boundary of data blocks. Then, for each data block whether its range
@@ -401,13 +432,6 @@ bool HybridCompaction::PrepareWork(
   t0_idx_iter = t0_idx_block->NewIterator(ops_.comparator);
   t0_idx_iter->Seek(t1_smallest);
   assert(t0_idx_iter->Valid());
-  // t0_idx_iter->SeekToFirst();
-  // while (t0_idx_iter->Valid()) {
-  //   if (ops_.comparator->Compare(t0_idx_iter->key(), t1_smallest) > 0) {
-  //     break;
-  //   }
-  //   t0_idx_iter->Next();
-  // }
 
   // data block
   if (ops_.direct_io) {
@@ -419,13 +443,6 @@ bool HybridCompaction::PrepareWork(
   t0_kvs_iter = t0_kvs_block->NewIterator(ops_.comparator);
   t0_kvs_iter->Seek(t1_smallest);
   assert(t0_kvs_iter->Valid());
-  // t0_kvs_iter->SeekToFirst();
-  // while (t0_kvs_iter->Valid()) {
-  //   if (ops_.comparator->Compare(t0_kvs_iter->key(), t1_smallest) > 0) {
-  //     break;
-  //   }
-  //   t0_kvs_iter->Next();
-  // }
 
   TableContext *ctx_0 = new TableContext();
   ctx_0->input = input_id;
@@ -510,22 +527,28 @@ bool HybridCompaction::PrepareWork(
   delete ctx_0;
   ctx_0 = nullptr;
 
-  if (ops_.compaction == CompactionType::kTableCompaction) {
-    return false;
-  }
-
-  if ((fmd_1->data_size * 0.6) < chosen) {
-    gPrepareChosen++;
-    return false;
-  }
-
   // In current implementation, we continue to perform table compaction in the
   // level_0. Because sstables of this levels are overlapped with each other.
   // Moreover, if there are two many dirty blocks, block compaction do not
   // work well and even incur large space consumption.
-  if (ops_.selective_compaction && level >= ops_.last_level &&
-      (fmd_1->data_size * ops_.overlap_ratio) < chosen) {
-    return false;
+
+  if (ops_.selective_compaction) {
+    if (level < ops_.last_level) {
+      if (chosen > (fmd_1->data_size * 0.8)) {
+        g_large_choosen_data++;
+        return false;
+      }
+    } else {
+      if (chosen > (fmd_1->data_size * 0.4)) {
+        g_large_choosen_data++;
+        return false;
+      }
+    }
+  } else {
+    if (chosen > (fmd_1->data_size * 0.8)) {
+      g_large_choosen_data++;
+      return false;
+    }
   }
 
   return true;
@@ -535,7 +558,7 @@ void HybridCompaction::AppendLefts_T0_Block(TableEditor *editor,
                                             TableContext *ctx_0) {
   while (ctx_0->kvs_iter->Valid()) {
     editor->set_largest(ctx_0->kvs_iter->key());
-    editor->AddNData(ctx_0->kvs_iter->key(), ctx_0->kvs_iter->value());
+    editor->AddPair(ctx_0->kvs_iter->key(), ctx_0->kvs_iter->value());
     ctx_0->kvs_iter->Next();
     if (AccessNextDataBlock_T0(ctx_0) == false) break;
   }
@@ -727,7 +750,7 @@ void HybridCompaction::UpdateOneDataBlock(TableEditor *editor,
                                 last_sequence_for_key);
     if (!drop) {
       editor->set_largest(key);
-      editor->AddNData(key, input->value());
+      editor->AddPair(key, input->value());
     }
     input->Next();
     if (AccessNextDataBlock_T0(ctx_0) == false) break;
@@ -735,13 +758,14 @@ void HybridCompaction::UpdateOneDataBlock(TableEditor *editor,
   // the reset key value pairs of the target data block.
   while (t1_kvs_iter->Valid()) {
     editor->set_largest(t1_kvs_iter->key());
-    editor->AddNData(t1_kvs_iter->key(), t1_kvs_iter->value());
+    editor->AddPair(t1_kvs_iter->key(), t1_kvs_iter->value());
     t1_kvs_iter->Next();
   }
   editor->NextBlock();
 }
 
 TableEditor *HybridCompaction::NewTableEditorForUpdate(FileMetaData *fmd_1,
+                                                       std::string *old_filter,
                                                        int cache_id) {
   uint64_t file_number = 0;
   uint64_t file_offset = 0;
@@ -754,7 +778,8 @@ TableEditor *HybridCompaction::NewTableEditorForUpdate(FileMetaData *fmd_1,
   }
   bool is_direct = ops_.direct_io;
   return new TableEditor(ops_, dbname_, file_number, file_offset,
-                         write_caches_[cache_id], is_direct);
+                         target_level_ + 1, old_filter,
+                         write_caches_[cache_id]);
 }
 
 void HybridCompaction::DoBlockCompaction(
@@ -764,26 +789,29 @@ void HybridCompaction::DoBlockCompaction(
    * Block Compaction
    * Mechanism: Merge Blocks + Append new blocks.
    */
-
   Compaction *c = compact_->compaction;
   const Comparator *comparator = ops_.comparator;
 
-  TableEditor *editor = NewTableEditorForUpdate(fmd_1, cache_id);
+  Cache::Handle *handle_1 = nullptr;
+  Table *table_1 = nullptr;
+
+  // table cache
+  handle_1 = table_cache_->LookupTAF(fmd_1->number, fmd_1->file_size);
+  table_1 = table_cache_->ValueTAF(handle_1);
+
+  std::string *old_filter = new std::string();
+  if (table_1->rep_->filter) {
+    old_filter->assign(table_1->rep_->filter_data, table_1->rep_->filter_size);
+  }
+  TableEditor *editor = NewTableEditorForUpdate(fmd_1, old_filter, cache_id);
   {
     compact_mtx_.Lock();
     compact_->reused_tables.insert(fmd_1->number);
     compact_mtx_.Unlock();
   }
 
-  Cache::Handle *handle_1 = nullptr;
-  Table *table_1 = nullptr;
-
   Block *t1_idx_block = nullptr;
   Iterator *t1_idx_iter = nullptr;
-
-  // table cache
-  handle_1 = table_cache_->LookupTAF(fmd_1->number, fmd_1->file_size);
-  table_1 = table_cache_->ValueTAF(handle_1);
 
   // index block
   t1_idx_block = table_1->GetIndexBlock();
@@ -839,7 +867,7 @@ void HybridCompaction::DoBlockCompaction(
       while (ctx_0->kvs_iter->Valid() &&
              comparator->Compare(ctx_0->kvs_iter->key(), first_key) < 0) {
         editor->set_largest(ctx_0->kvs_iter->key());
-        editor->AddNData(ctx_0->kvs_iter->key(), ctx_0->kvs_iter->value());
+        editor->AddPair(ctx_0->kvs_iter->key(), ctx_0->kvs_iter->value());
         ctx_0->kvs_iter->Next();
         if (AccessNextDataBlock_T0(ctx_0) == false) break;
       }
@@ -975,7 +1003,8 @@ TableEditor *HybridCompaction::NewTableEditorForCreate(int cache_id) {
   }
   bool is_direct = ops_.direct_io;
   return new TableEditor(ops_, dbname_, file_number, file_offset,
-                         write_caches_[cache_id], is_direct);
+                         target_level_ + 1, nullptr /* filter */,
+                         write_caches_[cache_id]);
 }
 
 void HybridCompaction::DoTableCompaction(int input_id, int cache_id,
@@ -1056,7 +1085,7 @@ void HybridCompaction::DoTableCompaction(int input_id, int cache_id,
         editor->set_smallest(key);
       }
       editor->set_largest(key);
-      editor->AddNData(key, input->value());
+      editor->AddPair(key, input->value());
       // Close output file if it is big enough
       if (editor->FileSize() >= c->MaxOutputTableSize()) {
         Status s = FinishTableCompaction(editor, job_stats);
@@ -1084,7 +1113,7 @@ void HybridCompaction::DoTableCompaction(int input_id, int cache_id,
         editor->set_smallest(ctx_0->kvs_iter->key());
       }
       editor->set_largest(ctx_0->kvs_iter->key());
-      editor->AddNData(ctx_0->kvs_iter->key(), ctx_0->kvs_iter->value());
+      editor->AddPair(ctx_0->kvs_iter->key(), ctx_0->kvs_iter->value());
       // Close output file if it is big enough
       if (editor->FileSize() >= c->MaxOutputTableSize()) {
         Status s = FinishTableCompaction(editor, job_stats);
@@ -1106,7 +1135,7 @@ void HybridCompaction::DoTableCompaction(int input_id, int cache_id,
         editor->set_smallest(t1_kvs_iter->key());
       }
       editor->set_largest(t1_kvs_iter->key());
-      editor->AddNData(t1_kvs_iter->key(), t1_kvs_iter->value());
+      editor->AddPair(t1_kvs_iter->key(), t1_kvs_iter->value());
       // Close output file if it is big enough
       if (editor->FileSize() >= c->MaxOutputTableSize()) {
         Status s = FinishTableCompaction(editor, job_stats);

@@ -8,21 +8,30 @@
 
 namespace leveldb {
 
-extern uint64_t gMemTableHit;
+// memory filter size
+extern std::atomic<uint64_t> g_memory_filter_size;
 
-extern uint64_t gBlockCacheMiss;
+// memory table index size
+extern std::atomic<uint64_t> g_memory_table_index_size;
 
-extern uint64_t gBlockCacheHit;
+// table cache
+extern std::atomic<uint64_t> g_table_cache_hit;
+extern std::atomic<uint64_t> g_table_cache_miss;
 
-extern uint64_t gTableCacheMiss;
+// block cache
+extern std::atomic<uint64_t> g_block_cache_hit;
+extern std::atomic<uint64_t> g_block_cache_miss;
 
-extern uint64_t gTableCacheHit;
+// memtable hit
+extern std::atomic<uint64_t> g_memtable_hit;
 
-extern uint64_t gPrepareFile;
+//  add bytes
+extern std::atomic<uint64_t> g_block_cache_add_bytes;
 
-extern uint64_t gPrepareChosen;
-
-extern uint64_t gPrepareData;
+// prepare work
+extern std::atomic<uint64_t> g_large_sstable_file;
+extern std::atomic<uint64_t> g_small_sstable_data;
+extern std::atomic<uint64_t> g_large_choosen_data;
 
 }  // namespace leveldb
 

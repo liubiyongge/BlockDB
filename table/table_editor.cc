@@ -22,7 +22,7 @@ namespace leveldb {
 
 TableEditor::TableEditor(const Options &opt, const std::string dbname,
                          uint64_t file_number, uint64_t file_offset,
-                         char *buffer, bool is_direct)
+                         uint64_t level, std::string *old_filter, char *buffer)
     : options_(opt),
       dbname_(dbname),
       index_options_(opt),
@@ -30,23 +30,28 @@ TableEditor::TableEditor(const Options &opt, const std::string dbname,
           false),  // pending_index_entry is true only if data_block_ is empty.
       file_number_(file_number),
       file_offset_(file_offset),
-      is_direct_(is_direct),
+      level_(level),
+      old_filter_(old_filter),
+      is_direct_(opt.direct_io),
       buffer_(buffer),
       offset_(0),
       num_entries_(0),
       closed_(false),
       data_block_(&options_),
       index_block_(&index_options_) {
-  // bloom filter block
+  // bloom filter
   if (opt.filter_policy == nullptr) {
-    filter_block_ = nullptr;
+    filter_table_ = nullptr;
   } else {
-    filter_block_ = new FilterBlockBuilder(opt.filter_policy);
+    if (file_offset > 0 && old_filter_ != nullptr) {
+      filter_table_ = new FilterTableBuilder(
+          const_cast<FilterPolicy *>(opt.filter_policy), level_, old_filter_);
+    } else {
+      filter_table_ = new FilterTableBuilder(
+          const_cast<FilterPolicy *>(opt.filter_policy), level_, nullptr);
+    }
   }
   index_options_.block_restart_interval = 1;
-  if (filter_block_ != nullptr) {
-    filter_block_->StartBlock(0);
-  }
 
   // There are two cases:
   // 1) file_offset == 0; we create new file.
@@ -86,11 +91,14 @@ TableEditor::TableEditor(const Options &opt, const std::string dbname,
 
 TableEditor::~TableEditor() {
   assert(closed_);  // Catch errors where caller forgot to call Finish()
-  delete filter_block_;
+  delete filter_table_;
+  if (old_filter_) {
+    delete old_filter_;
+  }
   // if (buffer_) free(buffer_);
 }
 
-void TableEditor::AddNData(const Slice &key, const Slice &value) {
+void TableEditor::AddPair(const Slice &key, const Slice &value) {
   assert(!closed_);
   if (!ok()) return;
   if (num_entries_ > 0) {
@@ -120,8 +128,8 @@ void TableEditor::AddNData(const Slice &key, const Slice &value) {
   }
 
   // filter block
-  if (filter_block_ != nullptr) {
-    filter_block_->AddKey(key);
+  if (filter_table_ != nullptr) {
+    filter_table_->AddKey(key);
   }
 
   // data block
@@ -180,9 +188,6 @@ void TableEditor::Flush() {
   WriteBlock(&data_block_, &pending_handle_);
   if (ok()) {
     pending_index_entry_ = true;
-  }
-  if (filter_block_ != nullptr) {
-    filter_block_->StartBlock(file_offset_);
   }
 }
 
@@ -288,17 +293,14 @@ void TableEditor::WriteRawBlock(const Slice &block_contents,
 }
 
 void TableEditor::Write2Align() {
-  int t = offset_ / kSectorSize;
-  if (t * kSectorSize < offset_) {
-    t++;
-  }
-  int size = t * kSectorSize;
-  Status s = outfile_->Append(Slice(buffer_, size));
+  uint64_t padding = (kSectorSize - offset_ % kSectorSize) % kSectorSize;
+  offset_ += padding;
+  Status s = outfile_->Append(Slice(buffer_, offset_));
   assert(s.ok());
-  file_offset_ += (size - offset_);
-  assert(file_offset_ % kSectorSize == 0);
+
+  file_offset_ += padding;
   offset_ = 0;
-  // memset(buffer_, 0, kBufferSize);
+  assert(file_offset_ % kSectorSize == 0);
 }
 
 void TableEditor::WriteBuffer(Slice data) {
@@ -330,22 +332,20 @@ Table *TableEditor::Finish(bool is_algined) {
   Flush();
 
   BlockHandle filter_block_handle, meta_index_block_handle, index_block_handle;
-  uint64_t right_padding = 0;
-  uint64_t table_index_offset = 0;
 
-  if (ok() && filter_block_ != nullptr) {
-    // Write bloom filter block
-    WriteRawBlock(filter_block_->Finish(), kNoCompression,
-                  &filter_block_handle);
+  Slice filter_contents;
+  // Write bloom filter block
+  if (ok() && filter_table_ != nullptr) {
+    filter_contents = filter_table_->Finish();
+    WriteRawBlock(filter_contents, kNoCompression, &filter_block_handle);
   }
-  assert(ok());
 
+  // Write meta index block
   if (ok()) {
-    // Write filter index block
     BlockBuilder meta_index_block_(&options_);
-    if (filter_block_ != NULL) {
+    if (filter_table_ != nullptr) {
       // Add mapping from "filter.Name" to location of filter data
-      std::string key = "filter.";
+      std::string key = "tablefilter.";
       key.append(options_.filter_policy->Name());
       std::string handle_encoding;
       filter_block_handle.EncodeTo(&handle_encoding);
@@ -354,11 +354,10 @@ Table *TableEditor::Finish(bool is_algined) {
     // TODO(postrelease): Add stats and other meta blocks
     WriteBlock(&meta_index_block_, &meta_index_block_handle);
   }
-  assert(ok());
 
   Slice index_contents;
+  // Write index block
   if (ok()) {
-    // Write index_block
     if (pending_index_entry_) {
       // options_.comparator->FindShortSuccessor(&last_key_);
       std::string handle_encoding;
@@ -385,16 +384,6 @@ Table *TableEditor::Finish(bool is_algined) {
   if (is_direct_) {
     Write2Align();
   }
-  // if (is_algined) {
-  //   uint64_t l = (kSectorSize - (file_offset_ % kSectorSize)) % kSectorSize;
-  //   if (l > 0) {
-  //     char *s = new char[l];
-  //     memset(s, 0, l);
-  //     outfile_->Append(Slice(s, l));
-  //     file_offset_ += l;
-  //     delete[] s;
-  //   }
-  // }
 
   // Write footer
   std::string footer_encoding;
@@ -418,23 +407,24 @@ Table *TableEditor::Finish(bool is_algined) {
   delete outfile_;
   outfile_ = nullptr;
 
+  // Open SSTable file
   std::string fname = TableFileName(dbname_, file_number_);
   RandomAccessFile *infile = nullptr;
-  if (is_direct_)
+  if (is_direct_) {
     s = options_.env->NewRandomAccessFileWithDirect(fname, &infile);
-  else
+  } else {
     s = options_.env->NewRandomAccessFile(fname, &infile);
-  assert(s.ok());
+  }
 
-  Table *tab = nullptr;
+  assert(s.ok());
 
   // index block
   uint64_t index_size = index_block_handle.size();
-  char *buf = new char[index_size];
-  memcpy(buf, index_contents.data(), index_contents.size());
+  char *index_buf = new char[index_size];
+  memcpy(index_buf, index_contents.data(), index_contents.size());
 
   BlockContents contents;
-  contents.data = Slice(buf, index_size);
+  contents.data = Slice(index_buf, index_size);
   contents.heap_allocated = true;
   contents.cachable = true;
 
@@ -444,15 +434,28 @@ Table *TableEditor::Finish(bool is_algined) {
   rep->metaindex_handle = meta_index_block_handle;
   rep->index_block = new Block(contents);
   rep->cache_id = 0;
-  rep->filter_data = nullptr;
-  rep->filter = nullptr;
+
+  // filter table
+  if (filter_table_ != nullptr) {
+    uint64_t filter_size = filter_block_handle.size();
+    char *filter_data = new char[filter_size];
+    memcpy(filter_data, filter_contents.data(), filter_contents.size());
+    rep->filter_data = filter_data;
+    rep->filter_size = filter_size;
+    rep->filter = new FilterTableReader(options_.filter_policy,
+                                        Slice(filter_data, filter_size));
+  } else {
+    rep->filter_data = nullptr;
+    rep->filter_size = 0;
+    rep->filter = nullptr;
+  }
+
   rep->file_number = file_number_;
   rep->file_size = file_offset_;
   rep->table_file = nullptr;
-  tab = new Table(rep);
 
   closed_ = true;
-  return tab;
+  return new Table(rep);
 }
 
 Status TableEditor::WriteTable(WritableFile *file) {

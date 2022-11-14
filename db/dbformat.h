@@ -23,13 +23,13 @@ namespace config {
 static const int kNumLevels = 7;
 
 // Level-0 compaction is started when we hit this many files.
-static const int kL0_CompactionTrigger = 4;
+static const int kL0_CompactionTrigger = 8;
 
 // Soft limit on number of level-0 files.  We slow down writes at this point.
-static const int kL0_SlowdownWritesTrigger = 8;
+static const int kL0_SlowdownWritesTrigger = 12;
 
 // Maximum number of level-0 files.  We stop writes at this point.
-static const int kL0_StopWritesTrigger = 12;
+static const int kL0_StopWritesTrigger = 16;
 
 // Maximum level to which a new compacted memtable is pushed if it
 // does not create overlap.  We try to push to level 2 to avoid the
@@ -133,6 +133,10 @@ class InternalFilterPolicy : public FilterPolicy {
   explicit InternalFilterPolicy(const FilterPolicy *p) : user_policy_(p) {}
   virtual const char *Name() const;
   virtual void CreateFilter(const Slice *keys, int n, std::string *dst) const;
+  virtual void CreateFilterWithReserved(const Slice *keys, int n,
+                                        std::string *dst,
+                                        uint64_t reserved) const;
+  virtual void AddKeys(const Slice *keys, int n, std::string *dst);
   virtual bool KeyMayMatch(const Slice &key, const Slice &filter) const;
 };
 

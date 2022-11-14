@@ -4,6 +4,8 @@
 
 #include "table/format.h"
 
+#include <malloc.h>
+
 #include "leveldb/env.h"
 #include "port/port.h"
 #include "table/block.h"
@@ -87,11 +89,8 @@ Status ReadBlock(bool direct_io, RandomAccessFile *file,
 
     block_off = handle.offset() - l_padding;
     block_len = l_padding + n + kBlockTrailerSize + r_padding;
-    int ret = posix_memalign((void **)&block_buf, kSectorSize, block_len);
-    if (ret != 0) {
-      printf("ReadBlock: Failed to posix_memalign!");
-      exit(0);
-    }
+    block_buf = reinterpret_cast<char *>(memalign(kSectorSize, block_len));
+    assert(block_buf != nullptr);
   } else {
     block_off = handle.offset();
     block_len = n + kBlockTrailerSize;
