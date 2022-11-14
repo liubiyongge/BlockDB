@@ -1,0 +1,70 @@
+mmap_limit: 1000
+open_read_only_file_limit: 200000
+mmap_limit: 1000
+open_read_only_file_limit: 200000
+Keys:       16 bytes each
+Values:     4096 bytes each (2048 bytes after compression)
+Entries:    2000000
+RawSize:    7843.0 MB (estimated)
+FileSize:   3936.8 MB (estimated)
+------------------------------------------------
+use Block Compaction!
+write buffer: 4.00
+max file size: 2.00
+direct io: 0
+selective: 1
+num workers: 8
+mmap_limit: 1000
+open_read_only_file_limit: 200000
+Keys:       16 bytes each
+Values:     4096 bytes each (2048 bytes after compression)
+Entries:    2000000
+RawSize:    7843.0 MB (estimated)
+FileSize:   3936.8 MB (estimated)
+------------------------------------------------
+use Block Compaction!
+write buffer: 4.00
+max file size: 2.00
+direct io: 0
+selective: 1
+num workers: 8
+mmap_limit: 1000
+open_read_only_file_limit: 200000
+Keys:       16 bytes each
+Values:     4096 bytes each (2048 bytes after compression)
+Entries:    200000
+RawSize:    784.3 MB (estimated)
+FileSize:   393.7 MB (estimated)
+------------------------------------------------
+use Block Compaction!
+write buffer: 4.00
+max file size: 2.00
+direct io: 0
+selective: 1
+num workers: 8
+use Block Compaction!
+write buffer: 4.00
+max file size: 2.00
+direct io: 0
+selective: 1
+num workers: 8
+mmap_limit: 1000
+open_read_only_file_limit: 200000
+Keys:       16 bytes each
+Values:     4096 bytes each (2048 bytes after compression)
+Entries:    200000
+RawSize:    784.3 MB (estimated)
+FileSize:   393.7 MB (estimated)
+------------------------------------------------
+use Block Compaction!
+write buffer: 4.00
+max file size: 2.00
+direct io: 0
+selective: 1
+num workers: 8
+use Block Compaction!
+write buffer: 4.00
+max file size: 2.00
+direct io: 0
+selective: 1
+num workers: 8

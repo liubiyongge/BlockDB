@@ -5,6 +5,8 @@
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
+#include <time.h>
 #include "db/db_impl.h"
 #include "db/version_set.h"
 #include "leveldb/cache.h"
@@ -17,6 +19,28 @@
 #include "util/mutexlock.h"
 #include "util/random.h"
 #include "util/testutil.h"
+#include "util/zipf.h"                                                  
+
+
+long last_value_latestgen;
+long count_basis_latestgen;
+
+long next_value_latestgen(){
+        long max = count_basis_latestgen - 1;
+        long next = max - nextLong(max);
+        last_value_latestgen = next;
+        return next;
+}
+
+// init_val should be the same parameter as the one the zipf generator is initialized with
+void init_latestgen(long init_val){
+        count_basis_latestgen = init_val;
+        //should init the zipf generator here, but it is already initialized
+        next_value_latestgen();
+}
+
+
+
 
 // Comma-separated list of operations to run in the specified order
 //   Actual benchmarks:
@@ -59,17 +83,26 @@ static const char* FLAGS_benchmarks =
 		"snappycomp,"
 		"snappyuncomp,"
 		"acquireload,"
+		 "ycsbwklda,"
+		 "ycsbwkldb,"
+		 "ycsbwkldc,"
+		 "ycsbwkldd,"
+		 "ycsbwklde,"
+		 "ycsbwkldf,"
+		 "ycsbfilldb,"
 		;
 
 // Number of key/values to place in database
 static int FLAGS_num = 1000000;
 
+static int FLAGS_loadnum = 50000000;
 // Number of read operations to do.  If negative, do FLAGS_num reads.
 static int FLAGS_reads = -1;
 
 // Number of concurrent threads to run.
 static int FLAGS_threads = 1;
 
+static int FLAGS_readwritepercent = 50;
 // Size of each value
 static int FLAGS_value_size = 100;
 
@@ -79,6 +112,8 @@ static double FLAGS_compression_ratio = 0.5;
 
 // Print histogram of operation timings
 static bool FLAGS_histogram = false;
+
+static bool FLAGS_YCSB_uniform_distribution = true;
 
 // Number of bytes to buffer in memtable before compacting
 // (initialized to default value by "main")
@@ -479,6 +514,10 @@ public:
 				num_ /= 1000;
 				write_options_.sync = true;
 				method = &Benchmark::WriteRandom;
+			} else if (name == "ycsbwklda") {
+				method = &Benchmark::YCSBWorkloadA;
+			} else if (name == "ycsbfilldb") {
+				method = &Benchmark::YCSBFillDB;
 			} else if (name == Slice("fill100K")) {
 				fresh_db = true;
 				num_ /= 1000;
@@ -771,6 +810,124 @@ private:
 		thread->stats.AddBytes(bytes);
 	}
 
+void YCSBFillDB(ThreadState* thread) {
+	char msg[100];
+	snprintf(msg, sizeof(msg), "(%d ops)", FLAGS_loadnum);
+	thread->stats.AddMessage(msg);
+    
+	RandomGenerator gen;
+    int64_t bytes = 0;
+
+    // the number of iterations is the larger of read_ or write_
+
+    for (long k = 1; k <= FLAGS_loadnum; k++){
+		char key[100];
+		snprintf(key, sizeof(key), "%016d", (thread->rand.Next() % FLAGS_loadnum));
+        //write
+        bytes += value_size_ + strlen(key);
+		Status s = db_->Put(write_options_, key, gen.Generate(value_size_));
+		thread->stats.FinishedSingleOp();
+        if (!s.ok()) {
+          fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          exit(1);
+        }
+        //printf("K= %d\n", k);
+    }
+	thread->stats.AddBytes(bytes);    
+      
+  }
+
+
+   // Workload A: Update heavy workload
+  // This workload has a mix of 50/50 reads and writes. 
+  // An application example is a session store recording recent actions.
+  // Read/update ratio: 50/50
+  // Default data size: 1 KB records 
+  // Request distribution: zipfian
+  void YCSBWorkloadA(ThreadState* thread) {
+    RandomGenerator gen;
+	ReadOptions options;
+    init_latestgen(FLAGS_loadnum);
+    init_zipf_generator(0, FLAGS_loadnum);
+    
+    std::string value;
+    int found = 0;
+
+    int reads_done = 0;
+    int writes_done = 0;
+
+
+    // the number of iterations is the larger of read_ or write_
+    for (long k = 1; k <= FLAGS_num; k++){       
+          int rand_tmp;
+		  if (FLAGS_YCSB_uniform_distribution){
+            //Generate number from uniform distribution            
+            rand_tmp = thread->rand.Next() % FLAGS_loadnum;
+          } else { //default
+            //Generate number from zipf distribution
+            rand_tmp = nextValue() % FLAGS_loadnum;            
+          }
+		char key[100];
+		snprintf(key, sizeof(key), "%016d", rand_tmp);
+
+          int next_op = thread->rand.Next() % 100;
+          if (next_op < FLAGS_readwritepercent){
+            //read
+            Status s = db_->Get(options, key, &value);
+            if (!s.ok() && !s.IsNotFound()) {
+              //fprintf(stderr, "k=%d; get error: %s\n", k, s.ToString().c_str());
+              //exit(1);
+              // we continue after error rather than exiting so that we can
+              // find more errors if any
+            } else if (!s.IsNotFound()) {
+              found++;
+            }
+            reads_done++;
+            
+          } else{
+            Status s = db_->Put(write_options_, key, gen.Generate(value_size_));
+            if (!s.ok()) {
+              fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+              exit(1);
+            } else{
+             writes_done++;
+            }
+		thread->stats.FinishedSingleOp();                
+      }
+
+    }
+	char msg[100];
+	snprintf(msg, sizeof(msg), "(reads: %d of %d found. writes: %d)", found, reads_done, writes_done);
+	thread->stats.AddMessage(msg); 
+  }
+
+  void LatestGenerator(){
+    printf("Latest Generator distribution test\n");
+    // Need a zipf generator
+    init_zipf_generator(0, 50);
+    init_latestgen(50);
+
+    for (int i=0; i<100; i++){
+        printf("%ld\n", next_value_latestgen() );
+    }
+
+  }
+
+  void Zipf() {
+    printf("ZIPF distribution test\n");
+    init_zipf_generator(0, 1000);
+    long vect[1000];
+    for (int i = 0; i<1000; i++){
+        vect[i] = 0;
+    }
+    for (int i = 0; i <= 10000; i++){
+        vect[nextValue()] += 1;
+    }
+    for (int i = 0; i < 1000; i++){
+        printf ("%ld\n", vect[i]);
+    }
+  }
+
 	void ReadSequential(ThreadState* thread) {
 		Iterator* iter = db_->NewIterator(ReadOptions());
 		int i = 0;
@@ -997,9 +1154,13 @@ int main(int argc, char** argv) {
 			FLAGS_bloom_bits = n;
 		} else if (sscanf(argv[i], "--open_files=%d%c", &n, &junk) == 1) {
 			FLAGS_open_files = n;
+		} else if (sscanf(argv[i], "--loadnum=%d%c", &n, &junk) == 1) {
+			FLAGS_loadnum = n;
+		}else if (sscanf(argv[i], "--readwritepercent=%d%c", &n, &junk) == 1) {
+			FLAGS_readwritepercent = n;
 		} else if (strncmp(argv[i], "--db=", 5) == 0) {
 			FLAGS_db = argv[i] + 5;
-		} else {
+		}else {
 			fprintf(stderr, "Invalid flag '%s'\n", argv[i]);
 			exit(1);
 		}
